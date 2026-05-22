@@ -2,7 +2,7 @@ use gstreamer::ClockTime;
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use gstreamer::{prelude::*, Bin, Caps, Element, ElementFactory, FlowError, GhostPad};
+use gstreamer::{prelude::*, Bin, Caps, Element, ElementFactory, GhostPad};
 use gstreamer_app::{AppSrc, AppSrcCallbacks, AppStreamType};
 use neolink_core::{
     bc_protocol::StreamKind,
@@ -352,18 +352,88 @@ fn send_to_sources(
     Ok(())
 }
 
+/// Round `n` up to the next power-of-two bucket, clamped to [MIN_BUCKET, MAX_BUCKET].
+/// Returns None when `n` exceeds MAX_BUCKET — those go through a one-off allocation.
+fn bucket_size_for(n: usize) -> Option<usize> {
+    const MIN_BUCKET: usize = 256;
+    // 1 MiB upper bound: frames larger than this are unusual; don't try to pool them.
+    const MAX_BUCKET: usize = 1024 * 1024;
+    if n == 0 {
+        return Some(MIN_BUCKET);
+    }
+    if n > MAX_BUCKET {
+        return None;
+    }
+    let mut b = n.next_power_of_two();
+    if b < MIN_BUCKET {
+        b = MIN_BUCKET;
+    }
+    Some(b)
+}
+
+/// Acquire (or allocate) a GStreamer buffer for `data`, using power-of-two pools.
+///
+/// Previously every unique byte-length produced its own pool, so a camera that
+/// varies frame sizes continuously (H.264 with traffic) could accumulate thousands
+/// of pools, each pre-allocating 8–32 buffers — a steady memory and fragmentation
+/// leak over hours/days of operation.  Bucketing collapses those into at most
+/// log2(MAX_BUCKET/MIN_BUCKET) ≈ 12 pools per appsrc.
+fn acquire_pooled_buffer(
+    pools: &mut std::collections::HashMap<usize, gstreamer::BufferPool>,
+    data: &[u8],
+    timestamp: gstreamer::ClockTime,
+) -> AnyResult<gstreamer::Buffer> {
+    let needed = data.len();
+    if let Some(bucket) = bucket_size_for(needed) {
+        let pool = pools.entry(bucket).or_insert_with(|| {
+            let pool = gstreamer::BufferPool::new();
+            let mut cfg = pool.config();
+            // caps=None, size=bucket, min_buffers=8, max_buffers=64
+            cfg.set_params(None, bucket as u32, 8, 64);
+            pool.set_config(cfg).expect("pool config failed");
+            pool.set_active(true).expect("activate pool");
+            log::info!("New BufferPool (bucket) allocated: size={bucket}");
+            pool
+        });
+        let mut buf = pool.acquire_buffer(None)?;
+        {
+            let buf_ref = buf.get_mut().unwrap();
+            buf_ref.set_dts(timestamp);
+            buf_ref.set_pts(timestamp);
+            {
+                let mut map = buf_ref.map_writable().unwrap();
+                map[..needed].copy_from_slice(data);
+            }
+            if bucket > needed {
+                let _ = buf_ref.set_size(needed);
+            }
+        }
+        Ok(buf)
+    } else {
+        // Oversized frame — allocate without pooling to avoid wasting pool slots.
+        let mut buf = gstreamer::Buffer::with_size(needed)
+            .context("allocate large non-pooled buffer")?;
+        {
+            let buf_ref = buf.get_mut().unwrap();
+            buf_ref.set_dts(timestamp);
+            buf_ref.set_pts(timestamp);
+            let mut map = buf_ref.map_writable().unwrap();
+            map.copy_from_slice(data);
+        }
+        Ok(buf)
+    }
+}
+
 fn send_to_appsrc(
-    appsrc: &AppSrc,
+    appsrc: &gstreamer_app::AppSrc,
     data: Vec<u8>,
-    mut ts: Duration,
-    pools: &mut HashMap<usize, gstreamer::BufferPool>,
+    mut ts: std::time::Duration,
+    pools: &mut std::collections::HashMap<usize, gstreamer::BufferPool>,
 ) -> AnyResult<()> {
     check_live(appsrc)?; // Stop if appsrc is dropped
 
-    // In live mode we follow the advice in
-    // https://gstreamer.freedesktop.org/documentation/additional/design/element-source.html?gi-language=c#live-sources
-    // Only push buffers when in play state and have a clock
-    // we also timestamp at the current time
+    // In live mode follow the GStreamer live-source design:
+    // only push while Playing and a clock is available; timestamp at wall clock.
     if appsrc.is_live() {
         if let Some(time) = appsrc
             .current_clock_time()
@@ -372,7 +442,7 @@ fn send_to_appsrc(
             if matches!(appsrc.current_state(), gstreamer::State::Playing) {
                 ts = Duration::from_micros(time.useconds());
             } else {
-                // Not playing
+                // Not playing yet
                 return Ok(());
             }
         } else {
@@ -380,68 +450,36 @@ fn send_to_appsrc(
             return Ok(());
         }
     }
-    let buf = {
-        let msg_size = data.len();
 
-        // Get or create a pool of this len
-        let pool = pools.entry(msg_size).or_insert_with_key(|size| {
-            let pool = gstreamer::BufferPool::new();
-            let mut pool_config = pool.config();
-            // Set a max buffers to ensure we don't grow in memory endlessly
-            pool_config.set_params(None, (*size) as u32, 8, 32);
-            pool.set_config(pool_config).unwrap();
-            pool.set_active(true).unwrap();
-            pool
-        });
+    let timestamp = ClockTime::from_useconds(ts.as_micros() as u64);
+    let buf = acquire_pooled_buffer(pools, &data, timestamp)?;
 
-        // Get a buffer from the pool and then copy in the data
-        let gst_buf = {
-            let mut new_buf = pool.acquire_buffer(None).unwrap();
-            let gst_buf_mut = new_buf.get_mut().unwrap();
-            let time = ClockTime::from_useconds(ts.as_micros() as u64);
-            gst_buf_mut.set_dts(time);
-            gst_buf_mut.set_pts(time);
-            let mut gst_buf_data = gst_buf_mut.map_writable().unwrap();
-            gst_buf_data.copy_from_slice(data.as_slice());
-            drop(gst_buf_data);
-            new_buf
-        };
-
-        // Return the new buffer with the data
-        gst_buf
-    };
-
-    // Push buffer into the appsrc
     match appsrc.push_buffer(buf) {
-        Ok(_) => {
-            // log::info!(
-            //     "Send {}{} on {}",
-            //     data.data.len(),
-            //     if data.keyframe { " (keyframe)" } else { "" },
-            //     appsrc.name()
-            // );
-            Ok(())
-        }
-        Err(FlowError::Flushing) => {
-            // Buffer is full just skip
-            log::info!(
-                "Buffer full on {} pausing stream until client consumes frames",
+        Ok(_) => {}
+        Err(gstreamer::FlowError::Flushing) => {
+            // The downstream leaky queue discards the oldest frame automatically;
+            // we just log and move on so the producer never blocks.
+            log::debug!(
+                "Appsrc {} is flushing — downstream queue full, frame discarded (live mode)",
                 appsrc.name()
             );
-            Ok(())
+            return Ok(());
         }
-        Err(e) => Err(anyhow!("Error in streaming: {e:?}")),
-    }?;
-    // Check if we need to pause
-    if appsrc.current_level_bytes() >= appsrc.max_bytes() * 2 / 3
-        && matches!(appsrc.current_state(), gstreamer::State::Paused)
-    {
-        appsrc.set_state(gstreamer::State::Playing).unwrap();
-    } else if appsrc.current_level_bytes() <= appsrc.max_bytes() / 3
-        && matches!(appsrc.current_state(), gstreamer::State::Playing)
-    {
-        appsrc.set_state(gstreamer::State::Paused).unwrap();
+        Err(e) => return Err(anyhow::anyhow!("Error in streaming: {e:?}")),
     }
+
+    // Gentle back-pressure: if the appsrc internal buffer is over 2/3 full while
+    // paused, resume; if under 1/3 while playing, pause briefly.
+    // The downstream leaky queue is the primary overflow safety valve — this is
+    // just a secondary guard so we don't spin-push into a completely saturated pipe.
+    let level = appsrc.current_level_bytes();
+    let max = appsrc.max_bytes();
+    if level >= max * 2 / 3 && matches!(appsrc.current_state(), gstreamer::State::Paused) {
+        let _ = appsrc.set_state(gstreamer::State::Playing);
+    } else if level <= max / 3 && matches!(appsrc.current_state(), gstreamer::State::Playing) {
+        let _ = appsrc.set_state(gstreamer::State::Paused);
+    }
+
     Ok(())
 }
 fn check_live(app: &AppSrc) -> Result<()> {
@@ -902,21 +940,25 @@ fn make_dbl_queue(name: &str, buffer_size: u32) -> AnyResult<Element> {
     let queue = make_element("queue", &format!("queue1_{}", name))?;
     queue.set_property("max-size-bytes", buffer_size);
     queue.set_property("max-size-buffers", 0u32);
-    queue.set_property("max-size-time", 0u64);
-    // queue.set_property(
-    //     "max-size-time",
-    //     std::convert::TryInto::<u64>::try_into(tokio::time::Duration::from_secs(5).as_nanos())
-    //         .unwrap_or(0),
-    // );
+    queue.set_property(
+        "max-size-time",
+        std::convert::TryInto::<u64>::try_into(
+            tokio::time::Duration::from_secs(1).as_nanos(),
+        )
+        .unwrap_or(0),
+    );
+    // Drop oldest frames to stay live
+    queue.set_property("leaky", 2u32);
 
     let queue2 = make_element("queue2", &format!("queue2_{}", name))?;
     queue2.set_property("max-size-bytes", buffer_size * 2u32 / 3u32);
-    queue.set_property("max-size-buffers", 0u32);
-    queue.set_property("max-size-time", 0u64);
+    queue2.set_property("max-size-buffers", 0u32);
     queue2.set_property(
         "max-size-time",
-        std::convert::TryInto::<u64>::try_into(tokio::time::Duration::from_secs(5).as_nanos())
-            .unwrap_or(0),
+        std::convert::TryInto::<u64>::try_into(
+            tokio::time::Duration::from_secs(1).as_nanos(),
+        )
+        .unwrap_or(0),
     );
     queue2.set_property("use-buffering", false);
 
@@ -948,16 +990,25 @@ fn make_queue(name: &str, buffer_size: u32) -> AnyResult<Element> {
     let queue = make_element("queue", &format!("queue1_{}", name))?;
     queue.set_property("max-size-bytes", buffer_size);
     queue.set_property("max-size-buffers", 0u32);
-    queue.set_property("max-size-time", 0u64);
+    // Live-stream mode: cap at exactly one I-frame period (1 s at 25 fps, 1x multiplier).
+    // When the queue is full we drop the OLDEST frame (leaky=downstream) so the output
+    // always reflects the most recent camera data rather than buffering into the past.
     queue.set_property(
         "max-size-time",
-        std::convert::TryInto::<u64>::try_into(tokio::time::Duration::from_secs(5).as_nanos())
-            .unwrap_or(0),
+        std::convert::TryInto::<u64>::try_into(
+            tokio::time::Duration::from_secs(1).as_nanos(),
+        )
+        .unwrap_or(0),
     );
+    // leaky=2 → downstream → discard oldest frames when full (live-stream priority)
+    queue.set_property("leaky", 2u32);
     Ok(queue)
 }
 
 fn buffer_size(bitrate: u32) -> u32 {
-    // 0.1 seconds (according to bitrate) or 4kb what ever is larger
-    std::cmp::max(bitrate * 2 / 8u32, 4u32 * 1024u32)
+    // Size the appsrc buffer to hold exactly 1 second of compressed data
+    // (matching the 1x I-frame multiplier assumption: one keyframe per second at 25 fps).
+    // bitrate is stored in bits/sec; /8 converts to bytes/sec = 1 s of data.
+    // Floor at 256 KiB so low-bitrate or unknown streams still have a workable buffer.
+    std::cmp::max(bitrate / 8u32, 256u32 * 1024u32)
 }
