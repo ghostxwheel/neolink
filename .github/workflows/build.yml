@@ -150,7 +150,7 @@ jobs:
           rustup toolchain install stable
       - name: Install toml-cli
         run: |
-          cargo install toml-cli
+          cargo install toml-cli --locked
       - name: Get project version
         id: toml
         run: |
@@ -191,7 +191,7 @@ jobs:
           rustup toolchain install stable
       - name: Install toml-cli
         run: |
-          cargo install toml-cli
+          cargo install toml-cli --locked
       - name: Get project version
         id: toml
         run: |
