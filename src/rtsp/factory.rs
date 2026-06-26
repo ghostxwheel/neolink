@@ -948,7 +948,7 @@ fn make_dbl_queue(name: &str, buffer_size: u32) -> AnyResult<Element> {
         .unwrap_or(0),
     );
     // Drop oldest frames to stay live
-    queue.set_property("leaky", 2u32);
+    queue.set_property_from_str("leaky", "downstream");
 
     let queue2 = make_element("queue2", &format!("queue2_{}", name))?;
     queue2.set_property("max-size-bytes", buffer_size * 2u32 / 3u32);
@@ -1000,8 +1000,8 @@ fn make_queue(name: &str, buffer_size: u32) -> AnyResult<Element> {
         )
         .unwrap_or(0),
     );
-    // leaky=2 → downstream → discard oldest frames when full (live-stream priority)
-    queue.set_property("leaky", 2u32);
+    // leaky=downstream → discard oldest frames when full (live-stream priority)
+    queue.set_property_from_str("leaky", "downstream");
     Ok(queue)
 }
 
