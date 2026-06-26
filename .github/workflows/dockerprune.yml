@@ -1,6 +1,6 @@
 name: DockerHub
 
-on: [push, pull_request, workflow_dispatch]
+on: [workflow_dispatch]
 
 jobs:
   pre_job:
