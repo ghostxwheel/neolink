@@ -48,15 +48,9 @@ RUN  echo "TARGETPLATFORM: ${TARGETPLATFORM}"; \
 # Create the release container. Match the base OS used to build
 FROM debian:bookworm-slim
 ARG TARGETPLATFORM
-ARG REPO
-ARG VERSION
-ARG OWNER
 
-LABEL description="An image for the neolink program which is a reolink camera to rtsp translator"
-LABEL repository="$REPO"
-LABEL version="$VERSION"
-LABEL maintainer="$OWNER"
-
+# Install runtime deps before version ARGs so this layer is cache-stable
+# across releases and can be served from Docker layer cache on repeat builds.
 # hadolint ignore=DL3008
 RUN apt-get update && \
     apt-get upgrade -y && \
@@ -74,6 +68,15 @@ RUN apt-get update && \
         gstreamer1.0-plugins-bad \
         gstreamer1.0-libav && \
     apt-get clean -y && rm -rf /var/lib/apt/lists/*
+
+ARG REPO
+ARG VERSION
+ARG OWNER
+
+LABEL description="An image for the neolink program which is a reolink camera to rtsp translator"
+LABEL repository="$REPO"
+LABEL version="$VERSION"
+LABEL maintainer="$OWNER"
 
 COPY --from=build \
   /usr/local/src/neolink/target/release/neolink \

@@ -71,6 +71,8 @@ jobs:
           key: cargo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             cargo-${{ matrix.arch }}-
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
       - name: Install ${{ matrix.arch }} Rust toolchain
         run: |
           rustup default "${{ env.rust_version }}"
@@ -86,6 +88,8 @@ jobs:
           PKG_CONFIG_LIBDIR: /usr/lib/${{ matrix.pkgconfig }}/pkgconfig
           TARGET: ${{ matrix.target }}
           JEMALLOC_SYS_WITH_LG_PAGE: 16
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.arch }}-bookworm
