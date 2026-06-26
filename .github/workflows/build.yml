@@ -61,6 +61,16 @@ jobs:
         run: |
           curl https://sh.rustup.rs -sSf | sh -s -- --no-modify-path --quiet -y
           echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.arch }}-
       - name: Install ${{ matrix.arch }} Rust toolchain
         run: |
           rustup default "${{ env.rust_version }}"
@@ -144,18 +154,11 @@ jobs:
           echo "TAGS=${tagstr}"  >> "${GITHUB_OUTPUT}"
         env:
           REPO_NAME: ${{ steps.docker_repo.outputs.DOCKER_NWO }}
-      - name: Install rust
-        run: |
-          rustup default "${{ env.rust_version }}"
-          rustup toolchain install stable
-      - name: Install toml-cli
-        run: |
-          cargo install toml-cli --locked
       - name: Get project version
         id: toml
         run: |
-          NEOLINK_VERSION="$(toml get Cargo.toml  package.version | sed 's|"||g')"
-          echo "version=${NEOLINK_VERSION}"  >> $GITHUB_OUTPUT
+          NEOLINK_VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')"
+          echo "version=${NEOLINK_VERSION}" >> $GITHUB_OUTPUT
       - name: Prepare directory
         run: |
           mkdir -p linux/arm64
@@ -173,6 +176,8 @@ jobs:
           file: Dockerfile
           tags: ${{ steps.tags.outputs.TAGS }}
           build-args: VERSION=${{ steps.toml.outputs.version }}, REPO=${{ github.repository }}, OWNER=${{ github.repository_owner }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
         env:
           DOCKER_BUILDKIT: 1
 
@@ -185,18 +190,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Install rust
-        run: |
-          rustup default "${{ env.rust_version }}"
-          rustup toolchain install stable
-      - name: Install toml-cli
-        run: |
-          cargo install toml-cli --locked
       - name: Get project version
         id: toml
         run: |
-          NEOLINK_VERSION="$(toml get Cargo.toml  package.version | sed 's|"||g')"
-          echo "version=${NEOLINK_VERSION}"  >> $GITHUB_OUTPUT
+          NEOLINK_VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')"
+          echo "version=${NEOLINK_VERSION}" >> $GITHUB_OUTPUT
       - name: Download Linux arm64
         uses: actions/download-artifact@v4
         with:
