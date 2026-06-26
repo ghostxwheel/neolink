@@ -49,6 +49,9 @@ pub(crate) struct Config {
     #[validate(nested)]
     #[serde(default)]
     pub(crate) users: Vec<UserConfig>,
+
+    #[serde(default = "default_session_timeout")]
+    pub(crate) session_timeout: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Validate, PartialEq, Eq)]
@@ -467,6 +470,10 @@ fn default_channel_id() -> u8 {
 
 fn default_update_time() -> bool {
     false
+}
+
+fn default_session_timeout() -> u32 {
+    30
 }
 
 fn default_motion_timeout() -> f64 {

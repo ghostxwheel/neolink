@@ -86,7 +86,8 @@ type AnyResult<T> = anyhow::Result<T, anyhow::Error>;
 ///
 /// Opt is the command line options
 pub(crate) async fn main(_opt: Opt, reactor: NeoReactor) -> Result<()> {
-    let rtsp = Arc::new(NeoRtspServer::new()?);
+    let session_timeout = reactor.config().await?.borrow().session_timeout;
+    let rtsp = Arc::new(NeoRtspServer::new(session_timeout)?);
 
     let global_cancel = CancellationToken::new();
 

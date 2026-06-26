@@ -35,12 +35,12 @@ glib::wrapper! {
 
 impl Default for NeoRtspServer {
     fn default() -> Self {
-        Self::new().unwrap()
+        Self::new(30).unwrap()
     }
 }
 
 impl NeoRtspServer {
-    pub(crate) fn new() -> AnyResult<Self> {
+    pub(crate) fn new(session_timeout: u32) -> AnyResult<Self> {
         gstreamer::init().context("Gstreamer failed to initialise")?;
         let factory = Object::new::<NeoRtspServer>();
 
@@ -57,15 +57,15 @@ impl NeoRtspServer {
         auth.set_default_token(Some(&mut un_authtoken));
         factory.set_auth(Some(&auth));
 
-        factory.connect_client_connected(|_, client| {
-            client.connect_new_session(|_, session| {
+        factory.connect_client_connected(move |_, client| {
+            client.connect_new_session(move |_, session| {
                 log::debug!("New Session");
                 // Session timeout too small causes us to drop
                 // some ffmpeg clients too soon
                 // Too long causes too many open connections with
                 // clients like frigate (that seem to open multiple
                 //   connections without shutting down old ones)
-                session.set_timeout(30);
+                session.set_timeout(session_timeout);
             });
         });
 
