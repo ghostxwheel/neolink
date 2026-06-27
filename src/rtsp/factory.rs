@@ -468,18 +468,6 @@ fn send_to_appsrc(
         Err(e) => return Err(anyhow::anyhow!("Error in streaming: {e:?}")),
     }
 
-    // Gentle back-pressure: if the appsrc internal buffer is over 2/3 full while
-    // paused, resume; if under 1/3 while playing, pause briefly.
-    // The downstream leaky queue is the primary overflow safety valve — this is
-    // just a secondary guard so we don't spin-push into a completely saturated pipe.
-    let level = appsrc.current_level_bytes();
-    let max = appsrc.max_bytes();
-    if level >= max * 2 / 3 && matches!(appsrc.current_state(), gstreamer::State::Paused) {
-        let _ = appsrc.set_state(gstreamer::State::Playing);
-    } else if level <= max / 3 && matches!(appsrc.current_state(), gstreamer::State::Playing) {
-        let _ = appsrc.set_state(gstreamer::State::Paused);
-    }
-
     Ok(())
 }
 fn check_live(app: &AppSrc) -> Result<()> {
