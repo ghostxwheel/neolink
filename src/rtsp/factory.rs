@@ -245,6 +245,9 @@ pub(super) async fn make_factory(
                         std::thread::spawn(move || {
                             let mut aud_ts = 0u64;
                             let mut vid_ts = 0u64;
+                            // Tracks the camera's last raw u32 capture timestamp so we can
+                            // unwrap it into the monotonic `vid_ts` (see send_to_sources).
+                            let mut last_vid_micros: Option<u32> = None;
                             let mut pools = Default::default();
 
                             log::trace!("{name}::{stream}: Sending buffered frames");
@@ -256,6 +259,7 @@ pub(super) async fn make_factory(
                                     &aud_src,
                                     &mut vid_ts,
                                     &mut aud_ts,
+                                    &mut last_vid_micros,
                                     &stream_config,
                                 )?;
                             }
@@ -269,6 +273,7 @@ pub(super) async fn make_factory(
                                     &aud_src,
                                     &mut vid_ts,
                                     &mut aud_ts,
+                                    &mut last_vid_micros,
                                     &stream_config,
                                 );
                                 if let Err(r) = &r {
@@ -306,6 +311,7 @@ fn send_to_sources(
     aud_src: &Option<AppSrc>,
     vid_ts: &mut u64,
     aud_ts: &mut u64,
+    last_vid_micros: &mut Option<u32>,
     stream_config: &StreamConfig,
 ) -> AnyResult<()> {
     // Update TS
@@ -338,14 +344,44 @@ fn send_to_sources(
             }
             *aud_ts += duration as u64;
         }
-        BcMedia::Iframe(BcMediaIframe { data, .. })
-        | BcMedia::Pframe(BcMediaPframe { data, .. }) => {
+        BcMedia::Iframe(BcMediaIframe {
+            data, microseconds, ..
+        })
+        | BcMedia::Pframe(BcMediaPframe {
+            data, microseconds, ..
+        }) => {
+            // Advance the video clock by the camera's *own* capture timestamp
+            // instead of a synthetic fixed-fps counter. The old approach assumed
+            // every frame was exactly 1/fps apart; the real cadence varies, so the
+            // synthetic clock drifted from both wall time and the (sample-accurate)
+            // audio clock, producing growing A/V desync and frame drops over hours.
+            //
+            // `microseconds` is a u32 that wraps roughly every 71.6 minutes, so we
+            // accumulate per-frame deltas into the monotonic u64 `vid_ts` using
+            // wrapping subtraction. Implausible deltas (camera clock reset on
+            // reconnect, or a >1s stall) fall back to one nominal frame period so
+            // the PTS never jumps minutes ahead or runs backwards.
+            const MICROSECONDS: u64 = 1000000;
+            let nominal = MICROSECONDS / stream_config.fps.max(1) as u64;
+            match *last_vid_micros {
+                None => {
+                    // First video frame: anchor the clock at the current vid_ts.
+                }
+                Some(prev) => {
+                    let raw_delta = microseconds.wrapping_sub(prev) as u64;
+                    let delta = if raw_delta == 0 || raw_delta > MICROSECONDS {
+                        nominal
+                    } else {
+                        raw_delta
+                    };
+                    *vid_ts += delta;
+                }
+            }
+            *last_vid_micros = Some(microseconds);
             if let Some(vid_src) = vid_src.as_ref() {
                 log::trace!("Sending VID: {:?}", Duration::from_micros(*vid_ts));
                 send_to_appsrc(vid_src, data, Duration::from_micros(*vid_ts), pools)?;
             }
-            const MICROSECONDS: u64 = 1000000;
-            *vid_ts += MICROSECONDS / stream_config.fps as u64;
         }
         _ => {}
     }
