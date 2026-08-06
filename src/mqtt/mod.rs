@@ -12,6 +12,7 @@
 //! - `/control/floodlight [on|off]` Turns floodlight (if equipped) on/off
 //! - `/control/led [on|off]` Turns status LED on/off
 //! - `/control/pir [on|off]` Turns PIR on/off
+//! - `/control/privacy [on|off]` Turns privacy (sleep) mode on/off - camera stops streaming while on
 //! - `/control/ir [on|off|auto]` Turn IR lights on/off or automatically via light detection
 //! - `/control/reboot` Reboot the camera
 //! - `/control/ptz` [up|down|left|right|in|out] (amount) Control the PTZ movements, amount defaults to 32.0
@@ -1066,6 +1067,52 @@ async fn handle_mqtt_message(
             mqtt.send_message("control/pir", &reply, false)
                 .await
                 .with_context(|| "Failed to publish pir off")?;
+        }
+        MqttReplyRef {
+            topic: "control/privacy",
+            message: "on",
+        } => {
+            let res = camera
+                .run_task(|cam| {
+                    Box::pin(async move {
+                        cam.privacy_set(true).await?;
+                        AnyResult::Ok(())
+                    })
+                })
+                .await;
+            let reply = if res.is_err() {
+                error!("Failed to turn on privacy mode: {:?}", res.err());
+                "FAIL"
+            } else {
+                "OK"
+            }
+            .to_string();
+            mqtt.send_message("control/privacy", &reply, false)
+                .await
+                .with_context(|| "Failed to publish privacy on")?;
+        }
+        MqttReplyRef {
+            topic: "control/privacy",
+            message: "off",
+        } => {
+            let res = camera
+                .run_task(|cam| {
+                    Box::pin(async move {
+                        cam.privacy_set(false).await?;
+                        AnyResult::Ok(())
+                    })
+                })
+                .await;
+            let reply = if res.is_err() {
+                error!("Failed to turn off privacy mode: {:?}", res.err());
+                "FAIL"
+            } else {
+                "OK"
+            }
+            .to_string();
+            mqtt.send_message("control/privacy", &reply, false)
+                .await
+                .with_context(|| "Failed to publish privacy off")?;
         }
         MqttReplyRef {
             topic: "control/wakeup",

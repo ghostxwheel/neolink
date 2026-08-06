@@ -104,6 +104,10 @@ pub const MSG_ID_GET_ZOOM_FOCUS: u32 = 294;
 pub const MSG_ID_SET_ZOOM_FOCUS: u32 = 295;
 /// Get the floodlight task xml
 pub const MSG_ID_FLOODLIGHT_TASKS_READ: u32 = 438;
+/// Getting the privacy/sleep mode status is done with this ID
+pub const MSG_ID_GET_PRIVACY_MODE: u32 = 574;
+/// Setting the privacy/sleep mode status is done with this ID
+pub const MSG_ID_SET_PRIVACY_MODE: u32 = 575;
 
 /// An empty password in legacy format
 pub const EMPTY_LEGACY_PASSWORD: &str =

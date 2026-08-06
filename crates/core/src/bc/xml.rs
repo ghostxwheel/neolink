@@ -48,6 +48,9 @@ pub struct BcXml {
     /// Received as part of the LEDState info request
     #[serde(rename = "LedState", skip_serializing_if = "Option::is_none")]
     pub led_state: Option<LedState>,
+    /// Sent or received as part of the privacy/sleep mode get/setting
+    #[serde(rename = "sleepState", skip_serializing_if = "Option::is_none")]
+    pub sleep_state: Option<SleepState>,
     /// Sent as part of the TalkConfig to prepare the camera for audio talk-back
     #[serde(rename = "TalkConfig", skip_serializing_if = "Option::is_none")]
     pub talk_config: Option<TalkConfig>,
@@ -421,6 +424,19 @@ pub struct LedState {
     /// State of the LED status light (blue on light), values are "open", "close"
     #[serde(rename = "lightState")]
     pub light_state: String,
+}
+
+/// sleepState xml, used to get/set the camera's privacy (sleep) mode
+#[derive(PartialEq, Eq, Default, Debug, Deserialize, Serialize)]
+pub struct SleepState {
+    /// XML Version
+    #[serde(rename = "@version")]
+    pub version: String,
+    /// Operation type. Observed value "2" when setting. Should be None when getting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operate: Option<String>,
+    /// Privacy/sleep mode state as a string: "1" enabled (privacy on), "0" disabled
+    pub sleep: String,
 }
 
 /// FloodlightStatus xml
