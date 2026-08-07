@@ -26,12 +26,16 @@
 //! `/status/battery` Sent in reply to a `/query/battery`
 //! `/status/pir` Sent in reply to a `/query/pir`
 //! `/status/ptz/preset` Sent in reply to a `/query/ptz/preset`
+//! `/status/privacy [on|off]` Sent (retained) whenever privacy mode is changed via
+//!    `/control/privacy`, and in reply to a `/query/privacy`
 //!
 //! Query Messages:
 //!
 //! `/query/battery` Request that the camera reports its battery level
 //! `/query/pir` Request that the camera reports its pir status
 //! `/query/ptz/preset` Request that the camera reports the PTZ presets
+//! `/query/privacy` Request that the camera reports its actual current
+//!    privacy (sleep) mode state to `/status/privacy`
 //! `/query/preview` Request that the camera post a base64 encoded jpeg
 //!    of the stream to `/status/preview`
 //!
@@ -1084,6 +1088,9 @@ async fn handle_mqtt_message(
                 error!("Failed to turn on privacy mode: {:?}", res.err());
                 "FAIL"
             } else {
+                mqtt.send_message("status/privacy", "on", true)
+                    .await
+                    .with_context(|| "Failed to publish privacy status")?;
                 "OK"
             }
             .to_string();
@@ -1107,12 +1114,45 @@ async fn handle_mqtt_message(
                 error!("Failed to turn off privacy mode: {:?}", res.err());
                 "FAIL"
             } else {
+                mqtt.send_message("status/privacy", "off", true)
+                    .await
+                    .with_context(|| "Failed to publish privacy status")?;
                 "OK"
             }
             .to_string();
             mqtt.send_message("control/privacy", &reply, false)
                 .await
                 .with_context(|| "Failed to publish privacy off")?;
+        }
+        MqttReplyRef {
+            topic: "query/privacy",
+            ..
+        } => {
+            let res = camera
+                .run_task(|cam| {
+                    Box::pin(async move {
+                        let xml = cam.get_privacystate().await?;
+                        AnyResult::Ok(xml)
+                    })
+                })
+                .await;
+            let reply = match res {
+                Err(e) => {
+                    error!("Failed to get privacy state: {:?}", e);
+                    "FAIL"
+                }
+                Ok(xml) => {
+                    let state = if xml.sleep == "1" { "on" } else { "off" };
+                    mqtt.send_message("status/privacy", state, true)
+                        .await
+                        .with_context(|| "Failed to publish privacy status")?;
+                    "OK"
+                }
+            }
+            .to_string();
+            mqtt.send_message("query/privacy", &reply, false)
+                .await
+                .with_context(|| "Failed to publish privacy query")?;
         }
         MqttReplyRef {
             topic: "control/wakeup",
